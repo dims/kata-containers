@@ -42,6 +42,8 @@ pub enum TaskRequest {
     ShutdownContainer(ShutdownRequest),
     PauseContainer(ContainerID),
     ResumeContainer(ContainerID),
+    CheckpointContainer(CheckpointRequest),
+    RestoreContainer(CheckpointRequest),
     ResizeProcessPTY(ResizePTYRequest),
     StatsContainer(ContainerID),
     UpdateContainer(UpdateRequest),
@@ -64,6 +66,8 @@ pub enum TaskResponse {
     ShutdownContainer,
     PauseContainer,
     ResumeContainer,
+    CheckpointContainer,
+    RestoreContainer,
     ResizeProcessPTY,
     StatsContainer(StatsInfo),
     UpdateContainer,
@@ -86,6 +90,13 @@ impl std::fmt::Display for ContainerID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.container_id)
     }
+}
+
+/// Checkpoint/restore request: which container + where the CRIU image set lives (guest path).
+#[derive(Clone, Debug)]
+pub struct CheckpointRequest {
+    pub container_id: ContainerID,
+    pub image_path: String,
 }
 
 impl ContainerID {

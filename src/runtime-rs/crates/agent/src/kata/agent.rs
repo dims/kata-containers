@@ -107,6 +107,8 @@ impl_agent!(
     stats_container | crate::ContainerID | crate::StatsContainerResponse | None,
     pause_container | crate::ContainerID | crate::Empty | None,
     resume_container | crate::ContainerID | crate::Empty | None,
+    checkpoint_container | crate::CheckpointContainerRequest | crate::Empty | None,
+    restore_container | crate::RestoreContainerRequest | crate::Empty | None,
     write_stdin | crate::WriteStreamRequest | crate::WriteStreamResponse | Some(0),
     read_stdout | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),
     read_stderr | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),

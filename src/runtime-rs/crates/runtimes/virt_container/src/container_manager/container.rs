@@ -644,6 +644,33 @@ impl Container {
         Ok(())
     }
 
+    pub async fn checkpoint(&self, image_path: &str) -> Result<()> {
+        // CRIU dumps the running container in the guest; it is left running
+        // (CRI CheckpointContainer semantics), so no state change here.
+        self.agent
+            .checkpoint_container(agent::CheckpointContainerRequest {
+                container_id: self.container_id.container_id.clone(),
+                image_path: image_path.to_owned(),
+            })
+            .await
+            .context("agent checkpoint container")?;
+
+        Ok(())
+    }
+
+    pub async fn restore(&self, image_path: &str) -> Result<()> {
+        // CRIU restores the checkpointed process tree in the guest from the image set.
+        self.agent
+            .restore_container(agent::RestoreContainerRequest {
+                container_id: self.container_id.container_id.clone(),
+                image_path: image_path.to_owned(),
+            })
+            .await
+            .context("agent restore container")?;
+
+        Ok(())
+    }
+
     pub async fn resize_pty(
         &self,
         process: &ContainerProcess,

@@ -5,7 +5,8 @@
 //
 
 use crate::types::{
-    ContainerConfig, ContainerID, ContainerProcess, ExecProcessRequest, KillRequest,
+    CheckpointRequest, ContainerConfig, ContainerID, ContainerProcess, ExecProcessRequest,
+    KillRequest,
     ProcessExitStatus, ProcessStateInfo, ResizePTYRequest, ShutdownRequest, StatsInfo,
     UpdateRequest, PID,
 };
@@ -19,6 +20,8 @@ pub trait ContainerManager: Send + Sync {
     async fn create_container(&self, config: ContainerConfig, spec: oci::Spec) -> Result<PID>;
     async fn pause_container(&self, container_id: &ContainerID) -> Result<()>;
     async fn resume_container(&self, container_id: &ContainerID) -> Result<()>;
+    async fn checkpoint_container(&self, req: &CheckpointRequest) -> Result<()>;
+    async fn restore_container(&self, req: &CheckpointRequest) -> Result<()>;
     async fn stats_container(&self, container_id: &ContainerID) -> Result<StatsInfo>;
     async fn update_container(&self, req: UpdateRequest) -> Result<()>;
     async fn connect_container(&self, container_id: &ContainerID) -> Result<PID>;

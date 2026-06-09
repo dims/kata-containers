@@ -13,7 +13,8 @@ use agent::Agent;
 use common::{
     error::Error,
     types::{
-        ContainerConfig, ContainerID, ContainerProcess, ExecProcessRequest, KillRequest,
+        CheckpointRequest, ContainerConfig, ContainerID, ContainerProcess, ExecProcessRequest,
+        KillRequest,
         ProcessExitStatus, ProcessStateInfo, ProcessStatus, ProcessType, ResizePTYRequest,
         ShutdownRequest, StatsInfo, UpdateRequest, PID,
     },
@@ -407,6 +408,26 @@ impl ContainerManager for VirtContainerManager {
             .get(&id.container_id)
             .ok_or_else(|| Error::ContainerNotFound(id.container_id.clone()))?;
         c.resume().await.context("resume")?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn checkpoint_container(&self, req: &CheckpointRequest) -> Result<()> {
+        let containers = self.containers.read().await;
+        let c = containers
+            .get(&req.container_id.container_id)
+            .ok_or_else(|| Error::ContainerNotFound(req.container_id.container_id.clone()))?;
+        c.checkpoint(&req.image_path).await.context("checkpoint")?;
+        Ok(())
+    }
+
+    #[instrument]
+    async fn restore_container(&self, req: &CheckpointRequest) -> Result<()> {
+        let containers = self.containers.read().await;
+        let c = containers
+            .get(&req.container_id.container_id)
+            .ok_or_else(|| Error::ContainerNotFound(req.container_id.container_id.clone()))?;
+        c.restore(&req.image_path).await.context("restore")?;
         Ok(())
     }
 

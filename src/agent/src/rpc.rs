@@ -1001,6 +1001,173 @@ impl agent_ttrpc::AgentService for AgentService {
         Ok(Empty::new())
     }
 
+    async fn checkpoint_container(
+        &self,
+        ctx: &TtrpcContext,
+        req: protocols::agent::CheckpointContainerRequest,
+    ) -> ttrpc::Result<protocols::empty::Empty> {
+        trace_rpc_call!(ctx, "checkpoint_container", req);
+        is_allowed(&req).await?;
+
+        let pid = {
+            let mut sandbox = self.sandbox.lock().await;
+            let ctr = sandbox
+                .get_container(&req.container_id)
+                .map_ttrpc_err(ttrpc::Code::INVALID_ARGUMENT, "invalid container id")?;
+            ctr.init_process_pid
+        };
+
+        let image_path = req.image_path.clone();
+        std::fs::create_dir_all(&image_path)
+            .map_ttrpc_err(|e| format!("create checkpoint image dir {image_path}: {e:?}"))?;
+
+        // Neutralize rslave mount propagation in the container mount namespace so CRIU
+        // can dump the mounts. busybox lives in the container rootfs (after nsenter -m).
+        let pid_s = pid.to_string();
+        if let Err(e) = Command::new("/usr/bin/nsenter")
+            .args([
+                "-t",
+                &pid_s,
+                "-m",
+                "--",
+                "/bin/busybox",
+                "mount",
+                "--make-rprivate",
+                "/",
+            ])
+            .status()
+        {
+            warn!(sl(), "checkpoint_container: make-rprivate failed: {:?}", e);
+        }
+
+        // Checkpoint with CRIU. The virtiofs rootfs is declared external; the container
+        // is left running (CRI CheckpointContainer semantics).
+        let output = Command::new("/usr/sbin/criu")
+            .args([
+                "dump",
+                "-t",
+                &pid_s,
+                "--images-dir",
+                &image_path,
+                "--external",
+                "mnt[/]:rootfs",
+                "--manage-cgroups",
+                "--tcp-established",
+                "--ext-unix-sk",
+                "--file-locks",
+                "--link-remap",
+                "--enable-external-masters",
+                "--enable-external-sharing",
+                "--shell-job",
+                "--leave-running",
+            ])
+            .output()
+            .map_ttrpc_err(|e| format!("spawn criu dump: {e:?}"))?;
+
+        if !output.status.success() {
+            return Err(ttrpc_error(
+                ttrpc::Code::INTERNAL,
+                format!(
+                    "criu dump failed (status {:?}): {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            ));
+        }
+        info!(sl(), "checkpoint_container: criu dump succeeded";
+            "container_id" => req.container_id.as_str(), "image_path" => image_path.as_str());
+        Ok(Empty::new())
+    }
+
+    async fn restore_container(
+        &self,
+        ctx: &TtrpcContext,
+        req: protocols::agent::RestoreContainerRequest,
+    ) -> ttrpc::Result<protocols::empty::Empty> {
+        trace_rpc_call!(ctx, "restore_container", req);
+        is_allowed(&req).await?;
+
+        let pid = {
+            let mut sandbox = self.sandbox.lock().await;
+            let ctr = sandbox
+                .get_container(&req.container_id)
+                .map_ttrpc_err(ttrpc::Code::INVALID_ARGUMENT, "invalid container id")?;
+            ctr.init_process_pid
+        };
+        let image_path = req.image_path.clone();
+        let rootfs = format!("/run/kata-containers/{}/rootfs", req.container_id);
+
+        // Free the checkpointed pids: the container was left running by the checkpoint,
+        // so kill its init to let CRIU restore the tree with the same pids.
+        let _ = nix::sys::signal::kill(Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Ensure the rootfs is writable: CRIU restore creates a put_root temp dir INSIDE the
+        // root (mount.c:2828 chdir(root)+mkdtemp), which fails on a read-only rootfs. Real
+        // containers often run RO, so remount rw for the restore (best-effort).
+        let _ = Command::new("/usr/bin/mount")
+            .args(["-o", "remount,rw", &rootfs])
+            .status();
+
+        // Capture the restored init's (new) pid so we can refresh the container's bookkeeping.
+        let pidfile = format!("/tmp/restore-{}.pid", req.container_id);
+        let _ = std::fs::remove_file(&pidfile);
+
+        let ext_map = format!("rootfs:{rootfs}");
+        let output = Command::new("/usr/sbin/criu")
+            .args([
+                "restore",
+                "--images-dir",
+                &image_path,
+                "--restore-detached",
+                "--pidfile",
+                &pidfile,
+                "--shell-job",
+                "--manage-cgroups",
+                "--ext-unix-sk",
+                "--tcp-established",
+                "--root",
+                &rootfs,
+                "--ext-mount-map",
+                &ext_map,
+                "--ext-mount-map",
+                "auto",
+            ])
+            .output()
+            .map_ttrpc_err(|e| format!("spawn criu restore: {e:?}"))?;
+
+        if !output.status.success() {
+            return Err(ttrpc_error(
+                ttrpc::Code::INTERNAL,
+                format!(
+                    "criu restore failed (status {:?}): {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            ));
+        }
+
+        // criu RC=0 with --restore-detached means the process tree was restored and running.
+        // The restored init returns under a NEW outer pid (it is pid 1 in its own pid
+        // namespace, which CRIU recreates), so refresh the container's stored
+        // init_process_pid — otherwise later ops (checkpoint again, kill, wait) target a
+        // dead pid.
+        let new_pid = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok());
+        if let Some(np) = new_pid {
+            let mut sandbox = self.sandbox.lock().await;
+            if let Some(ctr) = sandbox.get_container(&req.container_id) {
+                ctr.init_process_pid = np;
+            }
+        }
+        info!(sl(), "restore_container: criu restore succeeded";
+            "container_id" => req.container_id.as_str(),
+            "image_path" => image_path.as_str(),
+            "restored_pid" => new_pid.unwrap_or(-1));
+        Ok(Empty::new())
+    }
+
     async fn remove_stale_virtiofs_share_mounts(
         &self,
         ctx: &TtrpcContext,

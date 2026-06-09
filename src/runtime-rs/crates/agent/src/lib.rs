@@ -15,7 +15,8 @@ mod sock;
 pub mod types;
 pub use types::{
     ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, AddSwapPathRequest, AddSwapRequest,
-    BlkioStatsEntry, CheckRequest, CloseStdinRequest, ContainerID, ContainerProcessID,
+    BlkioStatsEntry, CheckRequest, CheckpointContainerRequest, CloseStdinRequest, ContainerID,
+    ContainerProcessID, RestoreContainerRequest,
     CopyFileRequest, CreateContainerRequest, CreateSandboxRequest, Empty, ExecProcessRequest,
     FSGroup, FSGroupChangePolicy, GetDiagnosticDataRequest, GetDiagnosticDataResponse,
     GetGuestDetailsRequest, GetIPTablesRequest, GetIPTablesResponse, GuestDetailsResponse,
@@ -70,6 +71,8 @@ pub trait Agent: AgentManager + HealthService + Send + Sync {
 
     // container
     async fn create_container(&self, req: CreateContainerRequest) -> Result<Empty>;
+    async fn checkpoint_container(&self, req: CheckpointContainerRequest) -> Result<Empty>;
+    async fn restore_container(&self, req: RestoreContainerRequest) -> Result<Empty>;
     async fn pause_container(&self, req: ContainerID) -> Result<Empty>;
     async fn remove_container(&self, req: RemoveContainerRequest) -> Result<Empty>;
     async fn resume_container(&self, req: ContainerID) -> Result<Empty>;
