@@ -782,8 +782,14 @@ fn do_init_child(cwfd: RawFd) -> Result<()> {
     let _ = unistd::close(crfd);
     let _ = unistd::close(cwfd);
 
-    if oci_process.terminal().unwrap_or_default() {
+    // The container's init process must be a session leader: a checkpoint/restore engine
+    // (CRIU) requires the pid-namespace init to be a session leader, and an init started
+    // without a terminal would otherwise remain in the agent's session. A terminal
+    // additionally needs the controlling tty set.
+    if init || oci_process.terminal().unwrap_or_default() {
         unistd::setsid().context("create a new session")?;
+    }
+    if oci_process.terminal().unwrap_or_default() {
         unsafe { libc::ioctl(0, libc::TIOCSCTTY) };
     }
 
