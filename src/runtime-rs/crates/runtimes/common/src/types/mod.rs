@@ -42,6 +42,8 @@ pub enum TaskRequest {
     ShutdownContainer(ShutdownRequest),
     PauseContainer(ContainerID),
     ResumeContainer(ContainerID),
+    CheckpointContainer(CheckpointRequest),
+    RestoreContainer(CheckpointRequest),
     ResizeProcessPTY(ResizePTYRequest),
     StatsContainer(ContainerID),
     UpdateContainer(UpdateRequest),
@@ -64,6 +66,8 @@ pub enum TaskResponse {
     ShutdownContainer,
     PauseContainer,
     ResumeContainer,
+    CheckpointContainer,
+    RestoreContainer,
     ResizeProcessPTY,
     StatsContainer(StatsInfo),
     UpdateContainer,
@@ -86,6 +90,13 @@ impl std::fmt::Display for ContainerID {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.container_id)
     }
+}
+
+/// Checkpoint/restore request: which container + where the CRIU image set lives (guest path).
+#[derive(Clone, Debug)]
+pub struct CheckpointRequest {
+    pub container_id: ContainerID,
+    pub image_path: String,
 }
 
 impl ContainerID {
@@ -143,6 +154,10 @@ pub struct ContainerConfig {
     pub stdin: Option<String>,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
+    /// Path to a checkpoint image. When set (create-with-checkpoint, i.e.
+    /// `ctr c restore --rw --live`), the container is restored from the CRIU
+    /// images instead of being started fresh.
+    pub checkpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Display)]

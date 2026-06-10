@@ -152,6 +152,18 @@ impl ContainerID {
 }
 
 #[derive(PartialEq, Clone, Default)]
+pub struct CheckpointContainerRequest {
+    pub container_id: String,
+    pub image_path: String,
+}
+
+#[derive(PartialEq, Clone, Default)]
+pub struct RestoreContainerRequest {
+    pub container_id: String,
+    pub image_path: String,
+}
+
+#[derive(PartialEq, Clone, Default)]
 pub struct ContainerProcessID {
     pub container_id: ContainerID,
     pub exec_id: String,

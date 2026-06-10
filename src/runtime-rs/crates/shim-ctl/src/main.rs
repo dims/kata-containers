@@ -27,6 +27,7 @@ async fn real_main() {
         stdin: None,
         stdout: None,
         stderr: None,
+        checkpoint: None,
     });
 
     manager.handler_task_message(req).await.ok();

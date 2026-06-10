@@ -5,8 +5,8 @@
 //
 
 use super::{
-    ContainerConfig, ContainerID, ContainerProcess, ExecProcessRequest, KillRequest,
-    ResizePTYRequest, SandboxConfig, SandboxID, SandboxNetworkEnv, SandboxRequest,
+    CheckpointRequest, ContainerConfig, ContainerID, ContainerProcess, ExecProcessRequest,
+    KillRequest, ResizePTYRequest, SandboxConfig, SandboxID, SandboxNetworkEnv, SandboxRequest,
     SandboxStatusRequest, ShutdownRequest, StopSandboxRequest, TaskRequest, UpdateRequest,
     DEFAULT_SHM_SIZE,
 };
@@ -172,6 +172,7 @@ impl TryFrom<api::CreateTaskRequest> for TaskRequest {
             stdin: (!from.stdin.is_empty()).then(|| from.stdin.clone()),
             stdout: (!from.stdout.is_empty()).then(|| from.stdout.clone()),
             stderr: (!from.stderr.is_empty()).then(|| from.stderr.clone()),
+            checkpoint: (!from.checkpoint.is_empty()).then(|| from.checkpoint.clone()),
         }))
     }
 }
@@ -273,6 +274,18 @@ impl TryFrom<api::PauseRequest> for TaskRequest {
     type Error = anyhow::Error;
     fn try_from(from: api::PauseRequest) -> Result<Self> {
         Ok(TaskRequest::PauseContainer(ContainerID::new(&from.id)?))
+    }
+}
+
+impl TryFrom<api::CheckpointTaskRequest> for TaskRequest {
+    type Error = anyhow::Error;
+    fn try_from(from: api::CheckpointTaskRequest) -> Result<Self> {
+        // containerd passes the checkpoint dir in `path`; the agent writes the CRIU image
+        // set there (a guest path).
+        Ok(TaskRequest::CheckpointContainer(CheckpointRequest {
+            container_id: ContainerID::new(&from.id)?,
+            image_path: from.path,
+        }))
     }
 }
 

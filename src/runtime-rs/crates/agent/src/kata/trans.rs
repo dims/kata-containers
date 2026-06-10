@@ -14,8 +14,9 @@ use protocols::{
 use crate::{
     types::{
         ARPNeighbor, ARPNeighbors, AddArpNeighborRequest, AddSwapPathRequest, AddSwapRequest,
-        AgentDetails, BlkioStats, BlkioStatsEntry, CgroupStats, CheckRequest, CloseStdinRequest,
-        ContainerID, CopyFileRequest, CpuStats, CpuUsage, CreateContainerRequest,
+        AgentDetails, BlkioStats, BlkioStatsEntry, CgroupStats, CheckRequest,
+        CheckpointContainerRequest, CloseStdinRequest, ContainerID, CopyFileRequest, CpuStats,
+        CpuUsage, CreateContainerRequest, RestoreContainerRequest,
         CreateSandboxRequest, Device, Empty, ExecProcessRequest, FSGroup, FSGroupChangePolicy,
         GetIPTablesRequest, GetIPTablesResponse, GuestDetailsResponse, HealthCheckResponse,
         HugetlbStats, IPAddress, IPFamily, Interface, Interfaces, KernelModule,
@@ -330,6 +331,26 @@ impl From<ContainerID> for agent::ResumeContainerRequest {
     fn from(from: ContainerID) -> Self {
         Self {
             container_id: from.container_id,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<CheckpointContainerRequest> for agent::CheckpointContainerRequest {
+    fn from(from: CheckpointContainerRequest) -> Self {
+        Self {
+            container_id: from.container_id,
+            image_path: from.image_path,
+            ..Default::default()
+        }
+    }
+}
+
+impl From<RestoreContainerRequest> for agent::RestoreContainerRequest {
+    fn from(from: RestoreContainerRequest) -> Self {
+        Self {
+            container_id: from.container_id,
+            image_path: from.image_path,
             ..Default::default()
         }
     }

@@ -342,7 +342,7 @@ impl Process {
     /// A container is considered exited once its IO ended.
     /// This function waits for IO to end. And then, do some cleanup
     /// things.
-    async fn run_io_wait(
+    pub(crate) async fn run_io_wait(
         &mut self,
         containers: Arc<RwLock<HashMap<String, Container>>>,
         agent: Arc<dyn Agent>,

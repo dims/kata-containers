@@ -79,5 +79,6 @@ impl_service!(
     stats | api::StatsRequest | api::StatsResponse,
     connect | api::ConnectRequest | api::ConnectResponse,
     shutdown | api::ShutdownRequest | api::Empty,
-    close_io | api::CloseIORequest | api::Empty
+    close_io | api::CloseIORequest | api::Empty,
+    checkpoint | api::CheckpointTaskRequest | api::Empty
 );

@@ -307,6 +307,50 @@ impl Container {
         containers: Arc<RwLock<HashMap<String, Container>>>,
         process: &ContainerProcess,
     ) -> Result<()> {
+        if matches!(process.process_type, ProcessType::Container)
+            && self.config.checkpoint.is_some()
+        {
+            // create-with-checkpoint (`ctr c restore --live`): restore the checkpointed
+            // process tree instead of starting a fresh init. Stage the CRIU images that
+            // containerd extracted from the image's CRIU layer into the rootfs upperdir
+            // host-side, so the guest -- and the agent's criu restore -- sees them at the
+            // well-known rootfs path. (If the image instead used --rw, the rootfs already
+            // carries them; this copy just refreshes from the authoritative CRIU layer.)
+            let guest_cr = format!(
+                "/run/kata-containers/{}/rootfs/.kata-cr",
+                self.container_id.container_id
+            );
+            if let Some(checkpoint) = self.config.checkpoint.as_deref() {
+                if !checkpoint.is_empty() && std::path::Path::new(checkpoint).exists() {
+                    if let Some(upper) = self.rootfs_upperdir() {
+                        let dst = format!("{}/.kata-cr", upper);
+                        std::fs::create_dir_all(&dst)
+                            .with_context(|| format!("create restore staging dir {}", dst))?;
+                        Self::copy_dir_contents(checkpoint, &dst)
+                            .context("stage CRIU images into rootfs upperdir")?;
+                        info!(self.logger, "restore: staged CRIU images from containerd layer";
+                            "from" => checkpoint, "to" => dst.as_str());
+                    }
+                }
+            }
+            info!(self.logger, "restoring container from checkpoint"; "image_path" => guest_cr.as_str());
+            self.restore(&guest_cr)
+                .await
+                .context("restore container from checkpoint")?;
+            let mut inner = self.inner.write().await;
+            inner.set_state(ProcessStatus::Running).await;
+            // Set up the exit wait so the task-exit event fires when the restored
+            // (subreaped) process dies -> containerd marks the task stopped, making
+            // `ctr t kill` / `ctr t rm` work on a restored container. No IO copy: the
+            // restored process owns its own fds (criu restored them), so pass an empty
+            // wait group.
+            inner
+                .init_process
+                .run_io_wait(containers, self.agent.clone(), awaitgroup::WaitGroup::new())
+                .await
+                .context("set up restore exit wait")?;
+            return Ok(());
+        }
         let mut inner = self.inner.write().await;
         match process.process_type {
             ProcessType::Container => {
@@ -640,6 +684,105 @@ impl Container {
             .await
             .context("agent pause container")?;
         inner.set_state(ProcessStatus::Running).await;
+
+        Ok(())
+    }
+
+    /// Host path of the overlay upperdir backing this container's rootfs (the guest
+    /// rootfs is virtiofs-shared from it), parsed from the snapshot mount options. Used to
+    /// move CRIU images between the guest rootfs and containerd's CRIU-layer path host-side.
+    fn rootfs_upperdir(&self) -> Option<String> {
+        self.config.rootfs_mounts.iter().find_map(|m| {
+            m.options
+                .iter()
+                .find_map(|o| o.strip_prefix("upperdir=").map(|s| s.to_string()))
+        })
+    }
+
+    /// Copy the *contents* of `src` into `dst` host-side, preserving attributes.
+    fn copy_dir_contents(src: &str, dst: &str) -> Result<()> {
+        let status = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(format!("{}/.", src))
+            .arg(format!("{}/", dst))
+            .status()
+            .context("spawn cp -a")?;
+        if !status.success() {
+            return Err(anyhow!(
+                "cp -a {}/. {}/ failed (rc={:?})",
+                src,
+                dst,
+                status.code()
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn checkpoint(&self, checkpoint_path: &str) -> Result<()> {
+        // The agent dumps CRIU images into the container rootfs (.kata-cr); the rootfs is
+        // virtiofs-backed by the host overlay upperdir, so they appear host-side there. The
+        // container is left running (CRI CheckpointContainer semantics).
+        let cid = self.container_id.container_id.clone();
+        let guest_cr = format!("/run/kata-containers/{}/rootfs/.kata-cr", cid);
+        self.agent
+            .checkpoint_container(agent::CheckpointContainerRequest {
+                container_id: cid,
+                image_path: guest_cr,
+            })
+            .await
+            .context("agent checkpoint container")?;
+
+        // Copy the images from the host upperdir into containerd's checkpoint path so they
+        // land in containerd's CRIU layer. containerd diffs the --rw snapshot *before* the
+        // task checkpoint runs, so the rw layer cannot carry a fresh dump; the CRIU layer
+        // (this path) is the reliable channel for `ctr c checkpoint` / `ctr c restore`.
+        // Stage the dumped images where the engine expects them. `ctr c checkpoint --task`
+        // passes the criu-layer dir in `checkpoint_path`; containerd's CRI plugin
+        // (`crictl checkpoint`) passes an empty path and instead reads from its per-container
+        // state dir (.../io.containerd.grpc.v1.cri/containers/<cid>/, where it expects
+        // stats-dump + the criu images). Cover both targets.
+        match self.rootfs_upperdir() {
+            Some(upper) => {
+                let src = format!("{}/.kata-cr", upper);
+                if std::path::Path::new(&src).exists() {
+                    let cri_dir = format!(
+                        "/var/lib/containerd/io.containerd.grpc.v1.cri/containers/{}",
+                        self.container_id.container_id
+                    );
+                    let mut targets: Vec<String> = Vec::new();
+                    if !checkpoint_path.is_empty() {
+                        targets.push(checkpoint_path.to_string());
+                    }
+                    if std::path::Path::new(&cri_dir).is_dir() {
+                        targets.push(cri_dir);
+                    }
+                    for t in &targets {
+                        std::fs::create_dir_all(t)
+                            .with_context(|| format!("create checkpoint dir {}", t))?;
+                        Self::copy_dir_contents(&src, t)
+                            .with_context(|| format!("copy CRIU images to {}", t))?;
+                        info!(self.logger, "checkpoint: staged CRIU images";
+                            "from" => src.as_str(), "to" => t.as_str());
+                    }
+                }
+            }
+            None => warn!(
+                self.logger,
+                "checkpoint: no rootfs upperdir found; CRIU images remain only in the rootfs"
+            ),
+        }
+        Ok(())
+    }
+
+    pub async fn restore(&self, image_path: &str) -> Result<()> {
+        // CRIU restores the checkpointed process tree in the guest from the image set.
+        self.agent
+            .restore_container(agent::RestoreContainerRequest {
+                container_id: self.container_id.container_id.clone(),
+                image_path: image_path.to_owned(),
+            })
+            .await
+            .context("agent restore container")?;
 
         Ok(())
     }
