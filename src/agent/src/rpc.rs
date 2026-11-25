@@ -581,7 +581,8 @@ impl AgentService {
                 Ok(()) => (),
             }
         } else {
-            // Signalling all processes in the cgroup
+            // Signalling all processes of the container: the init process
+            // and the processes in the cgroup
             info!(
                 sl(),
                 "signal all the remaining processes";
@@ -635,12 +636,25 @@ impl AgentService {
         ctr.cgroup_manager.as_ref().freeze(state)
     }
 
+    // Returns the PIDs of all the processes of a container: the processes in
+    // its cgroup and its init process.
     async fn get_pids(&self, cid: &str) -> Result<Vec<i32>> {
         let mut sandbox = self.sandbox.lock().await;
         let ctr = sandbox
             .get_container(cid)
             .ok_or_else(|| anyhow!("Invalid container id {}", cid))?;
-        ctr.cgroup_manager.as_ref().get_pids()
+        let pids = ctr.cgroup_manager.as_ref().get_pids()?;
+
+        // A process that was reaped has no exit_tx. Its PID can belong to
+        // another process by now, so it must not get a signal.
+        let init_pid = ctr.init_process_pid;
+        let init_pid = ctr
+            .processes
+            .values()
+            .find(|p| p.pid == init_pid && p.exit_tx.is_some())
+            .map(|p| p.pid);
+
+        Ok(with_init_pid(pids, init_pid))
     }
 
     #[instrument]
@@ -2238,6 +2252,23 @@ fn append_guest_hooks(s: &Sandbox, oci: &mut Spec) -> Result<()> {
     Ok(())
 }
 
+// Adds the init process of a container to the PIDs that a request to signal
+// all the processes of the container targets.
+//
+// The init process must always get the signal. When the container has its
+// own PID namespace, the kernel then kills all the other processes of the
+// container. The cgroup manager is not a reliable source for it: the init
+// process can be in a cgroup that the manager does not list.
+fn with_init_pid(mut pids: Vec<pid_t>, init_pid: Option<pid_t>) -> Vec<pid_t> {
+    if let Some(init_pid) = init_pid {
+        if !pids.contains(&init_pid) {
+            pids.push(init_pid);
+        }
+    }
+
+    pids
+}
+
 // Check if the container process installed the
 // handler for specific signal.
 fn is_signal_handled(proc_status_file: &str, signum: u32) -> bool {
@@ -3548,6 +3579,40 @@ mod tests {
             let msg = format!("{msg}, result: {result:?}");
 
             assert_result!(d.result, result, msg);
+        }
+    }
+
+    #[test]
+    fn test_with_init_pid() {
+        let test_cases = [
+            (
+                "init process that the cgroup manager does not list",
+                vec![],
+                Some(10),
+                vec![10],
+            ),
+            (
+                "init process added to the cgroup processes",
+                vec![11, 12],
+                Some(10),
+                vec![11, 12, 10],
+            ),
+            (
+                "init process already in the cgroup processes",
+                vec![10, 11],
+                Some(10),
+                vec![10, 11],
+            ),
+            ("no init process", vec![11, 12], None, vec![11, 12]),
+        ];
+
+        for (name, pids, init_pid, expected) in test_cases {
+            assert_eq!(
+                with_init_pid(pids, init_pid),
+                expected,
+                "test case: {}",
+                name
+            );
         }
     }
 

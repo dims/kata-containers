@@ -44,6 +44,7 @@ use std::sync::{Arc, RwLock};
 use super::DevicesCgroupInfo;
 
 const GUEST_CPUS_PATH: &str = "/sys/devices/system/cpu/online";
+const CGROUP_PROCS: &str = "cgroup.procs";
 const ROOT_SUBCGROUP: &str = "/";
 const INIT_SUBCGROUP: &str = "/init/";
 
@@ -225,10 +226,10 @@ impl CgroupManager for Manager {
 
     fn get_pids(&self) -> Result<Vec<pid_t>> {
         let mem_controller: &MemController = self.cgroup.controller_of().unwrap();
-        let pids = mem_controller.tasks();
-        let result = pids.iter().map(|x| x.pid as i32).collect::<Vec<i32>>();
+        let mut pids = Vec::new();
+        collect_pids(mem_controller.path(), &mut pids);
 
-        Ok(result)
+        Ok(pids)
     }
 
     fn update_cpuset_path(&self, guest_cpuset: &str, container_cpuset: &str) -> Result<()> {
@@ -1084,6 +1085,40 @@ fn load_cgroup(h: Box<dyn cgroups::Hierarchy>, path: &str) -> Cgroup {
     cgroups::Cgroup::load(h, valid_path.as_str())
 }
 
+/// Collect the PIDs of the processes in the cgroup directory `dir` and in
+/// all of its descendant cgroups.
+///
+/// `cgroup.procs` lists the processes of one cgroup only, and a container
+/// can move its processes into child cgroups. With cgroup v2 it must do so
+/// before it enables a controller for its children, which is what systemd
+/// or a nested container runtime does. The cgroup of the container itself
+/// is then empty.
+fn collect_pids(dir: &Path, pids: &mut Vec<pid_t>) {
+    // Read errors are not fatal: a cgroup can go away while its parent is
+    // walked, and `cgroup.procs` cannot be read in a threaded cgroup, whose
+    // processes are listed in the threaded domain above it.
+    if let Ok(procs) = fs::read_to_string(dir.join(CGROUP_PROCS)) {
+        pids.extend(
+            procs
+                .lines()
+                .filter_map(|line| line.trim().parse::<pid_t>().ok())
+                // The kernel prints 0 for a process that is not visible in
+                // the PID namespace of the reader. Never return it: a
+                // signal to PID 0 goes to the process group of the caller.
+                .filter(|pid| *pid > 0),
+        );
+    }
+
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            // The directories of a cgroup directory are its child cgroups.
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                collect_pids(&entry.path(), pids);
+            }
+        }
+    }
+}
+
 impl Manager {
     pub fn new(
         cpath: &str,
@@ -1422,6 +1457,7 @@ fn convert_memory_swap_to_v2_value(memory_swap: i64, memory: i64) -> Result<i64>
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::{Arc, RwLock};
@@ -1434,9 +1470,12 @@ mod tests {
         LinuxResourcesBuilder, SpecBuilder,
     };
     use oci_spec::runtime as oci;
+    use tempfile::tempdir;
     use test_utils::skip_if_not_root;
 
-    use super::{cgroup_path_under_root, default_allowed_devices, load_cgroup};
+    use super::{
+        cgroup_path_under_root, collect_pids, default_allowed_devices, load_cgroup, CGROUP_PROCS,
+    };
     use crate::cgroups::fs::{
         get_throttled_time, line_to_vec, lines_to_map, Manager, DEFAULT_ALLOWED_DEVICES, WILDCARD,
     };
@@ -1473,6 +1512,57 @@ mod tests {
             manager.cgroup_path_with_subcgroup("/"),
             "/docker.slice/docker-containers.slice/container"
         );
+    }
+
+    #[test]
+    fn test_collect_pids() {
+        // The layout of a container that runs systemd with cgroup v2: the
+        // cgroup of the container has no process, they are all in child
+        // cgroups.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let cgroups = [
+            ("", ""),
+            ("init.scope", "1\n"),
+            ("system.slice", ""),
+            ("system.slice/containerd.service", "120\n121\n"),
+            // PID 0 is a process outside of the PID namespace of the reader.
+            ("kubelet.slice/kubelet-kubepods.slice/pod", "0\n300\n"),
+        ];
+        for (cgroup, procs) in cgroups {
+            let path = root.join(cgroup);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join(CGROUP_PROCS), procs).unwrap();
+        }
+        // A cgroup without a readable `cgroup.procs` still has its children
+        // walked.
+        fs::create_dir_all(root.join("threaded/domain")).unwrap();
+        fs::write(root.join("threaded/domain").join(CGROUP_PROCS), "400\n").unwrap();
+        // The other files of a cgroup directory are not cgroups.
+        fs::write(root.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+
+        let test_cases = [
+            (
+                "container cgroup with all processes in child cgroups",
+                "",
+                vec![1, 120, 121, 300, 400],
+            ),
+            (
+                "child cgroup with a grandchild",
+                "system.slice",
+                vec![120, 121],
+            ),
+            ("leaf cgroup", "init.scope", vec![1]),
+            ("cgroup without cgroup.procs", "threaded", vec![400]),
+            ("cgroup that does not exist", "no-such-cgroup", vec![]),
+        ];
+
+        for (name, cgroup, expected) in test_cases {
+            let mut pids = Vec::new();
+            collect_pids(&root.join(cgroup), &mut pids);
+            pids.sort_unstable();
+            assert_eq!(pids, expected, "test case: {}", name);
+        }
     }
 
     #[test]
